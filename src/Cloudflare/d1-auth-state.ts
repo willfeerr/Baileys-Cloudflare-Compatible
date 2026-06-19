@@ -86,6 +86,10 @@ export const useD1AuthState = async (
 						const typedCategory = category as keyof SignalDataTypeMap
 						const categoryData = data[typedCategory]
 
+						if (!categoryData) {
+							continue
+						}
+
 						for (const id in categoryData) {
 							const value = categoryData[id]
 							const key = `key:${category}:${id}`
