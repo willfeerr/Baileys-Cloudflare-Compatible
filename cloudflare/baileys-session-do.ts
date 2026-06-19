@@ -9,6 +9,8 @@ export interface Env {
 	BAILEYS_SESSION: DurableObjectNamespace
 	BAILEYS_D1: D1Database
 	BAILEYS_API_TOKEN?: string
+	/** Set to false/0/no/off to keep WebSocket smoke tests from connecting to WhatsApp automatically. */
+	BAILEYS_AUTO_START?: string
 }
 
 type WASocket = ReturnType<typeof makeWASocket>
@@ -32,6 +34,8 @@ const getStatusCode = (error: unknown): number | undefined => {
 }
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+const isDisabled = (value: string | undefined) => ['false', '0', 'no', 'off'].includes(String(value || '').toLowerCase())
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -118,11 +122,17 @@ export class BaileysSessionDO {
 		this.state.acceptWebSocket(server)
 		this.send(server, { type: 'hello', sessionId: this.sessionId })
 
-		void this.startBaileys().catch(error => {
-			this.broadcast({ type: 'baileys.start.error', error: String(error?.message || error) })
-		})
+		if (this.shouldAutoStart()) {
+			void this.startBaileys().catch(error => {
+				this.broadcast({ type: 'baileys.start.error', error: String(error?.message || error) })
+			})
+		}
 
 		return new Response(null, { status: 101, webSocket: client })
+	}
+
+	private shouldAutoStart() {
+		return !isDisabled(this.env.BAILEYS_AUTO_START)
 	}
 
 	private async resolveSessionId(request?: Request): Promise<string> {
