@@ -4,6 +4,7 @@ import makeWASocket, {
 	type D1Database,
 	useD1AuthState
 } from '../src/index'
+import { miniWhatsAppResponse } from './mini-whatsapp-app'
 
 export interface Env {
 	BAILEYS_SESSION: DurableObjectNamespace
@@ -37,20 +38,40 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 const isDisabled = (value: string | undefined) => ['false', '0', 'no', 'off'].includes(String(value || '').toLowerCase())
 
+const readToken = (request: Request) => {
+	const url = new URL(request.url)
+	return request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') || url.searchParams.get('token') || ''
+}
+
+const assertAuthorized = (request: Request, env: Env) => {
+	if (!env.BAILEYS_API_TOKEN) {
+		return null
+	}
+
+	const token = readToken(request)
+	if (token !== env.BAILEYS_API_TOKEN) {
+		return json({ ok: false, error: 'Unauthorized' }, 401)
+	}
+
+	return null
+}
+
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url)
 		const [, route, sessionId = 'default'] = url.pathname.split('/')
 
-		if (route !== 'session') {
-			return json({ ok: false, error: 'Use /session/:sessionId' }, 404)
+		if (route === '' || route === 'app') {
+			return miniWhatsAppResponse()
 		}
 
-		if (env.BAILEYS_API_TOKEN) {
-			const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
-			if (token !== env.BAILEYS_API_TOKEN) {
-				return json({ ok: false, error: 'Unauthorized' }, 401)
-			}
+		if (route !== 'session') {
+			return json({ ok: false, error: 'Use /app or /session/:sessionId' }, 404)
+		}
+
+		const unauthorized = assertAuthorized(request, env)
+		if (unauthorized) {
+			return unauthorized
 		}
 
 		const id = env.BAILEYS_SESSION.idFromName(sessionId)
@@ -78,6 +99,14 @@ export class BaileysSessionDO {
 		}
 
 		const url = new URL(request.url)
+		const segments = url.pathname.split('/').filter(Boolean)
+		const action = segments[2]
+
+		if (action === 'store') {
+			const bucket = segments[3]
+			return this.readStoreBucket(bucket, url)
+		}
+
 		if (url.pathname.endsWith('/start')) {
 			await this.startBaileys()
 			return json({ ok: true, sessionId: this.sessionId })
@@ -133,6 +162,20 @@ export class BaileysSessionDO {
 
 	private shouldAutoStart() {
 		return !isDisabled(this.env.BAILEYS_AUTO_START)
+	}
+
+	private async readStoreBucket(bucket: string | undefined, url: URL) {
+		const allowed = new Set(['messages', 'contacts', 'chats', 'groups', 'media', 'msg-retry', 'user-devices'])
+		if (!bucket || !allowed.has(bucket)) {
+			return json({ ok: false, error: 'Invalid store bucket' }, 400)
+		}
+
+		const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 80), 1), 500)
+		const afterUpdatedAt = Number(url.searchParams.get('afterUpdatedAt') || 0)
+		const store = await createD1BaileysStore(this.env.BAILEYS_D1, { sessionId: this.sessionId })
+		const entries = await store.list(bucket, { limit, afterUpdatedAt })
+
+		return json({ ok: true, sessionId: this.sessionId, bucket, entries })
 	}
 
 	private async resolveSessionId(request?: Request): Promise<string> {
