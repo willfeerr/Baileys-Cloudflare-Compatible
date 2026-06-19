@@ -209,6 +209,7 @@ const maybeRenderQr = async qr => {
 const preflight = async () => {
 	const required = [
 		'cloudflare/baileys-session-do.ts',
+		'cloudflare/mini-whatsapp-app.ts',
 		'cloudflare/schema.sql',
 		config,
 		'src/Cloudflare/d1-auth-state.ts',
@@ -269,6 +270,12 @@ const assertD1HasCreds = async mode => {
 }
 
 const smokeHttp = async () => {
+	const app = await fetch(`${baseUrl}/app`)
+	const appHtml = await app.text()
+	assert.equal(app.status, 200)
+	assert.match(appHtml, /Mini WhatsApp/)
+	assert.match(appHtml, /Conectar WS/)
+
 	const unauthorized = await fetchJson(`${baseUrl}/session/${sessionId}`, { auth: false })
 	assert.equal(unauthorized.response.status, 401, 'Expected 401 without Authorization header')
 
@@ -277,12 +284,22 @@ const smokeHttp = async () => {
 	assert.equal(health.body.ok, true)
 	assert.equal(health.body.sessionId, sessionId)
 
+	const healthWithQueryToken = await fetchJson(`${baseUrl}/session/${sessionId}?token=${encodeURIComponent(token)}`, { auth: false })
+	assert.equal(healthWithQueryToken.response.status, 200)
+	assert.equal(healthWithQueryToken.body.ok, true)
+
+	const store = await fetchJson(`${baseUrl}/session/${sessionId}/store/messages?limit=5`)
+	assert.equal(store.response.status, 200)
+	assert.equal(store.body.ok, true)
+	assert.equal(store.body.bucket, 'messages')
+	assert.equal(Array.isArray(store.body.entries), true)
+
 	const notFound = await fetchJson(`${baseUrl}/nope/${sessionId}`)
 	assert.equal(notFound.response.status, 404)
 }
 
 const smokeWebSocket = async () => {
-	const wsUrl = `${baseUrl.replace(/^http/, 'ws')}/session/${sessionId}`
+	const wsUrl = `${baseUrl.replace(/^http/, 'ws')}/session/${sessionId}?token=${encodeURIComponent(token)}`
 	const client = await openWs(wsUrl)
 
 	try {
@@ -304,7 +321,7 @@ const smokeWebSocket = async () => {
 }
 
 const liveWhatsAppFlow = async mode => {
-	const wsUrl = `${baseUrl.replace(/^http/, 'ws')}/session/${sessionId}`
+	const wsUrl = `${baseUrl.replace(/^http/, 'ws')}/session/${sessionId}?token=${encodeURIComponent(token)}`
 	const client = await openWs(wsUrl)
 
 	try {
@@ -393,7 +410,7 @@ try {
 		await step('wait for remote Worker', () => waitForHttp(`${baseUrl}/session/${sessionId}`))
 	}
 
-	await step('HTTP smoke', smokeHttp)
+	await step('HTTP + mini app smoke', smokeHttp)
 	await step('WebSocket smoke', smokeWebSocket)
 
 	if (live) {
