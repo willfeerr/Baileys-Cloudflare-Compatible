@@ -175,8 +175,10 @@ export class WebSocketClient extends AbstractSocketClient {
 				throw new Error('WebSocket is not open')
 			}
 
-			;(this.socket as any).send(str, cb)
-			if (!('once' in this.socket)) {
+			if ('once' in this.socket) {
+				this.socket.send(str, cb)
+			} else {
+				this.socket.send(str)
 				cb?.()
 			}
 
