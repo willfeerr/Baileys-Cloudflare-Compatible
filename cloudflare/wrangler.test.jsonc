@@ -1,0 +1,32 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "baileys-cloudflare-session-e2e",
+  "main": "./baileys-session-do.ts",
+  "compatibility_date": "2026-06-19",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "BAILEYS_SESSION",
+        "class_name": "BaileysSessionDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["BaileysSessionDO"]
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "BAILEYS_D1",
+      "database_name": "baileys_cloudflare_e2e",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "vars": {
+    "BAILEYS_API_TOKEN": "test-token",
+    "BAILEYS_AUTO_START": "false"
+  }
+}
