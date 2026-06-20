@@ -1,4 +1,4 @@
-import type { CacheStore } from '../Types'
+import type { BaileysEventEmitter, CacheStore } from '../Types'
 import { BufferJSON } from '../Utils'
 import { assertSafeSqlIdentifier, ensureD1BaileysSchema } from './d1-schema'
 import type { D1Database, D1PreparedStatement } from './types'
@@ -120,53 +120,60 @@ export const createD1BaileysStore = async (db: D1Database, options: D1StoreOptio
 		flushAll: () => clear(bucket),
 		close: () => undefined
 	})
+	const toStoreEntry = <T>(id: string | null | undefined, value: T): Array<{ id: string; value: T }> => {
+		return id ? [{ id, value }] : []
+	}
 
-	const bindToEventEmitter = (ev: { on: (event: string, cb: (...args: any[]) => void) => void }) => {
-		ev.on('messages.upsert', async ({ messages }: { messages?: any[] }) => {
+	const bindToEventEmitter = (ev: BaileysEventEmitter) => {
+		ev.on('messages.upsert', async ({ messages }) => {
 			await upsertMany(
 				'messages',
-				(messages || [])
-					.map(message => ({ id: message?.key?.id || JSON.stringify(message?.key), value: message }))
-					.filter(entry => Boolean(entry.id))
+				messages.flatMap(message => toStoreEntry(message.key.id || JSON.stringify(message.key), message))
 			)
 		})
 
-		ev.on('contacts.upsert', async (contacts: any[]) => {
+		ev.on('contacts.upsert', async contacts => {
 			await upsertMany(
 				'contacts',
-				(contacts || [])
-					.map(contact => ({ id: contact.id || contact.jid, value: contact }))
-					.filter(entry => Boolean(entry.id))
+				contacts.flatMap(contact =>
+					toStoreEntry(
+						contact.id || ('jid' in contact && typeof contact.jid === 'string' ? contact.jid : undefined),
+						contact
+					)
+				)
 			)
 		})
 
-		ev.on('contacts.update', async (contacts: any[]) => {
+		ev.on('contacts.update', async contacts => {
 			await upsertMany(
 				'contacts',
-				(contacts || [])
-					.map(contact => ({ id: contact.id || contact.jid, value: contact }))
-					.filter(entry => Boolean(entry.id))
+				contacts.flatMap(contact =>
+					toStoreEntry(
+						contact.id || ('jid' in contact && typeof contact.jid === 'string' ? contact.jid : undefined),
+						contact
+					)
+				)
 			)
 		})
 
-		ev.on('chats.upsert', async (chats: any[]) => {
+		ev.on('chats.upsert', async chats => {
 			await upsertMany(
 				'chats',
-				(chats || []).map(chat => ({ id: chat.id, value: chat })).filter(entry => Boolean(entry.id))
+				chats.flatMap(chat => toStoreEntry(chat.id, chat))
 			)
 		})
 
-		ev.on('chats.update', async (chats: any[]) => {
+		ev.on('chats.update', async chats => {
 			await upsertMany(
 				'chats',
-				(chats || []).map(chat => ({ id: chat.id, value: chat })).filter(entry => Boolean(entry.id))
+				chats.flatMap(chat => toStoreEntry(chat.id, chat))
 			)
 		})
 
-		ev.on('groups.update', async (groups: any[]) => {
+		ev.on('groups.update', async groups => {
 			await upsertMany(
 				'groups',
-				(groups || []).map(group => ({ id: group.id, value: group })).filter(entry => Boolean(entry.id))
+				groups.flatMap(group => toStoreEntry(group.id, group))
 			)
 		})
 	}
