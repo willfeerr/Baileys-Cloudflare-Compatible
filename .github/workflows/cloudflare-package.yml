@@ -1,0 +1,132 @@
+name: Cloudflare Durable Object Package
+
+on:
+  push:
+    branches:
+      - master
+      - cloudflare-durable-object
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        type: boolean
+        description: 'Update the GitHub release asset after validation'
+        default: true
+      release_tag:
+        type: string
+        description: 'Release tag that receives the packed tarball'
+        default: 'cloudflare-durable-object'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  package-cloudflare-durable-object:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PACKAGE_BASENAME: baileys-cloudflare-durable-object
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Enable Corepack and Set Yarn Version
+        run: |
+          corepack enable
+          corepack prepare yarn@4.x --activate
+
+      - name: Restore Yarn Cache
+        uses: actions/cache@v4
+        with:
+          path: .yarn/cache
+          key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Lint
+        run: yarn lint
+
+      - name: Test
+        run: yarn test
+
+      - name: Build library
+        run: yarn build
+
+      - name: Validate Cloudflare Worker bundle
+        run: |
+          npx --yes wrangler@latest deploy \
+            --dry-run \
+            --config cloudflare/wrangler.test.jsonc \
+            --outdir cloudflare/.wrangler-dry-run
+
+      - name: Pack compiled library
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          npm pack --ignore-scripts --pack-destination dist
+          package_file="$(find dist -maxdepth 1 -name 'baileys-*.tgz' -print -quit)"
+          test -n "$package_file"
+          mv "$package_file" "dist/${PACKAGE_BASENAME}.tgz"
+          shasum -a 256 "dist/${PACKAGE_BASENAME}.tgz" > "dist/${PACKAGE_BASENAME}.sha256"
+
+      - name: Verify package contents
+        run: |
+          set -euo pipefail
+          tar -tf "dist/${PACKAGE_BASENAME}.tgz" > dist/package-files.txt
+          grep -q '^package/lib/index.js$' dist/package-files.txt
+          grep -q '^package/lib/index.d.ts$' dist/package-files.txt
+          grep -q '^package/lib/Cloudflare/index.js$' dist/package-files.txt
+          grep -q '^package/lib/Cloudflare/d1-auth-state.js$' dist/package-files.txt
+          grep -q '^package/lib/Cloudflare/d1-store.js$' dist/package-files.txt
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: baileys-cloudflare-durable-object
+          path: |
+            dist/baileys-cloudflare-durable-object.tgz
+            dist/baileys-cloudflare-durable-object.sha256
+            dist/package-files.txt
+          if-no-files-found: error
+
+      - name: Publish stable GitHub release asset
+        if: >-
+          ${{
+            github.event_name == 'push' && github.ref == 'refs/heads/master' ||
+            github.event_name == 'workflow_dispatch' && inputs.publish_release
+          }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || 'cloudflare-durable-object' }}
+        run: |
+          set -euo pipefail
+          notes="Compiled Baileys package with Cloudflare Durable Object support for ${GITHUB_SHA}."
+          files=(
+            "dist/${PACKAGE_BASENAME}.tgz"
+            "dist/${PACKAGE_BASENAME}.sha256"
+            "dist/package-files.txt"
+          )
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
+            gh release edit "$RELEASE_TAG" \
+              --title "$RELEASE_TAG" \
+              --notes "$notes" \
+              --prerelease
+          else
+            gh release create "$RELEASE_TAG" "${files[@]}" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" \
+              --notes "$notes" \
+              --prerelease
+          fi
