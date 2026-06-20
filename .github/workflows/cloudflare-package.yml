@@ -77,11 +77,18 @@ jobs:
           package_file="$(find dist -maxdepth 1 -name 'baileys-*.tgz' -print -quit)"
           test -n "$package_file"
           mv "$package_file" "dist/${PACKAGE_BASENAME}.tgz"
-          shasum -a 256 "dist/${PACKAGE_BASENAME}.tgz" > "dist/${PACKAGE_BASENAME}.sha256"
+          (
+            cd dist
+            shasum -a 256 "${PACKAGE_BASENAME}.tgz" > "${PACKAGE_BASENAME}.sha256"
+          )
 
       - name: Verify package contents
         run: |
           set -euo pipefail
+          (
+            cd dist
+            shasum -a 256 -c "${PACKAGE_BASENAME}.sha256"
+          )
           tar -tf "dist/${PACKAGE_BASENAME}.tgz" > dist/package-files.txt
           grep -q '^package/lib/index.js$' dist/package-files.txt
           grep -q '^package/lib/index.d.ts$' dist/package-files.txt
