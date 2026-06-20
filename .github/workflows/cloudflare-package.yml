@@ -118,11 +118,20 @@ jobs:
         run: |
           set -euo pipefail
           notes="Compiled Baileys package with Cloudflare Durable Object support for ${GITHUB_SHA}."
+          immutable_tag="cloudflare-durable-object-${GITHUB_SHA:0:12}"
           files=(
             "dist/${PACKAGE_BASENAME}.tgz"
             "dist/${PACKAGE_BASENAME}.sha256"
             "dist/package-files.txt"
           )
+
+          if ! gh release view "$immutable_tag" >/dev/null 2>&1; then
+            gh release create "$immutable_tag" "${files[@]}" \
+              --target "$GITHUB_SHA" \
+              --title "$immutable_tag" \
+              --notes "$notes" \
+              --prerelease
+          fi
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
