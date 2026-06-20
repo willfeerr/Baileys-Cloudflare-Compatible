@@ -121,17 +121,54 @@ export const miniWhatsAppAppHtml = () => `<!doctype html>
       color: #c8ffe1;
       font-size: 12px;
     }
-    #qrCanvas {
-      width: 240px;
-      height: 240px;
-      background: white;
-      border-radius: 12px;
-      padding: 8px;
-      display: none;
-    }
-    .muted { color: var(--muted); }
-    .small { font-size: 12px; }
-    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+	    #qrImage {
+	      width: min(100%, 340px);
+	      height: auto;
+	      aspect-ratio: 1;
+	      background: white;
+	      border-radius: 12px;
+	      padding: 10px;
+	      display: none;
+	    }
+	    #qrOverlay {
+	      position: fixed;
+	      inset: 0;
+	      z-index: 100;
+	      display: grid;
+	      place-items: center;
+	      padding: 20px;
+	      background: rgba(3, 10, 7, .94);
+	    }
+	    #qrOverlay[hidden] { display: none; }
+	    .qr-shell {
+	      width: min(760px, 100%);
+	      display: grid;
+	      gap: 14px;
+	      justify-items: center;
+	    }
+	    .qr-actions {
+	      width: min(680px, 100%);
+	      justify-content: space-between;
+	    }
+	    .qr-actions strong {
+	      flex: 0 1 auto;
+	      font-size: 18px;
+	    }
+	    .qr-actions button {
+	      flex: 0 0 auto;
+	    }
+	    #qrLargeImage {
+	      width: min(86vw, 86vh, 680px);
+	      height: auto;
+	      aspect-ratio: 1;
+	      background: white;
+	      border-radius: 18px;
+	      padding: 18px;
+	      box-shadow: 0 30px 90px rgba(0,0,0,.48);
+	    }
+	    .muted { color: var(--muted); }
+	    .small { font-size: 12px; }
+	    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     @media (max-width: 1100px) { .split { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -170,15 +207,16 @@ export const miniWhatsAppAppHtml = () => `<!doctype html>
         </div>
       </div>
 
-      <div class="card grid">
-        <h3 style="margin:0">QR / Pareamento</h3>
-        <canvas id="qrCanvas"></canvas>
-        <textarea id="qrRaw" placeholder="QR raw aparece aqui" readonly></textarea>
-        <div class="row">
-          <button id="copyQrBtn" class="secondary">Copiar QR raw</button>
-          <button id="clearQrBtn" class="secondary">Limpar QR</button>
-        </div>
-        <p class="muted small">No WhatsApp: Aparelhos conectados → Conectar aparelho. Se o canvas não renderizar, copie o QR raw e use um gerador externo.</p>
+	      <div class="card grid">
+	        <h3 style="margin:0">QR / Pareamento</h3>
+	        <img id="qrImage" alt="QR de pareamento" />
+	        <textarea id="qrRaw" placeholder="QR raw aparece aqui" readonly></textarea>
+	        <div class="row">
+	          <button id="copyQrBtn" class="secondary">Copiar QR raw</button>
+	          <button id="openQrViewBtn" class="secondary">QR grande</button>
+	          <button id="clearQrBtn" class="secondary">Limpar QR</button>
+	        </div>
+	        <p class="muted small">No WhatsApp: Aparelhos conectados → Conectar aparelho. Se o canvas não renderizar, copie o QR raw e use um gerador externo.</p>
       </div>
 
       <div class="card grid">
@@ -233,20 +271,29 @@ export const miniWhatsAppAppHtml = () => `<!doctype html>
           <div id="chats" class="list"></div>
         </div>
       </div>
-    </section>
-  </main>
+	    </section>
+	  </main>
 
-  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
-  <script>
-    const $ = id => document.getElementById(id)
-    const state = { ws: null, events: [] }
+	  <div id="qrOverlay" hidden>
+	    <div class="qr-shell">
+	      <div class="row qr-actions">
+	        <strong>QR grande</strong>
+	        <button id="closeQrViewBtn" class="secondary">Fechar</button>
+	      </div>
+	      <img id="qrLargeImage" alt="QR de pareamento grande" />
+	    </div>
+	  </div>
 
-    const els = {
-      token: $('token'), session: $('session'), dot: $('dot'), statusText: $('statusText'),
-      qrCanvas: $('qrCanvas'), qrRaw: $('qrRaw'), events: $('events'),
-      messages: $('messages'), contacts: $('contacts'), chats: $('chats'),
-      jid: $('jid'), messageText: $('messageText')
-    }
+	  <script>
+	    const $ = id => document.getElementById(id)
+	    const state = { ws: null, events: [], qr: '' }
+
+	    const els = {
+	      token: $('token'), session: $('session'), dot: $('dot'), statusText: $('statusText'),
+	      qrImage: $('qrImage'), qrLargeImage: $('qrLargeImage'), qrOverlay: $('qrOverlay'), qrRaw: $('qrRaw'), events: $('events'),
+	      messages: $('messages'), contacts: $('contacts'), chats: $('chats'),
+	      jid: $('jid'), messageText: $('messageText')
+	    }
 
     els.token.value = localStorage.getItem('baileys.token') || ''
     els.session.value = localStorage.getItem('baileys.session') || 'main'
@@ -299,17 +346,22 @@ export const miniWhatsAppAppHtml = () => `<!doctype html>
       state.ws.send(JSON.stringify({ type, requestId, ...data }))
       log('command.sent', { type, requestId, ...data })
     }
-    async function renderQr(qr) {
-      els.qrRaw.value = qr || ''
-      if (!qr) {
-        els.qrCanvas.style.display = 'none'
-        return
-      }
-      if (window.QRCode && window.QRCode.toCanvas) {
-        els.qrCanvas.style.display = 'block'
-        await window.QRCode.toCanvas(els.qrCanvas, qr, { width: 240, margin: 1 })
-      }
-    }
+	    async function renderQr(qr) {
+	      state.qr = qr || ''
+	      els.qrRaw.value = qr || ''
+	      if (!qr) {
+	        els.qrImage.style.display = 'none'
+	        els.qrImage.removeAttribute('src')
+	        els.qrLargeImage.removeAttribute('src')
+	        els.qrOverlay.hidden = true
+	        return
+	      }
+	      const qrUrl = '/qr?token=' + encodeURIComponent(token()) + '&data=' + encodeURIComponent(qr) + '&t=' + Date.now()
+	      els.qrImage.src = qrUrl
+	      els.qrLargeImage.src = qrUrl
+	      els.qrImage.style.display = 'block'
+	      els.qrOverlay.hidden = false
+	    }
     function connect() {
       savePrefs()
       if (!token()) return alert('Informe o token')
@@ -363,12 +415,17 @@ export const miniWhatsAppAppHtml = () => `<!doctype html>
     $('restartBtn').onclick = () => command('restart')
     $('resetAuthBtn').onclick = () => confirm('Resetar auth? Vai precisar parear de novo.') && command('reset-auth')
     $('resetAllBtn').onclick = () => confirm('Resetar auth + store?') && command('reset-all')
-    $('sendBtn').onclick = () => {
-      savePrefs()
-      command('send-message', { jid: els.jid.value.trim(), text: els.messageText.value })
-    }
-    $('copyQrBtn').onclick = () => navigator.clipboard.writeText(els.qrRaw.value || '')
-    $('clearQrBtn').onclick = () => renderQr('')
+	    $('sendBtn').onclick = () => {
+	      savePrefs()
+	      command('send-message', { jid: els.jid.value.trim(), text: els.messageText.value })
+	    }
+	    $('copyQrBtn').onclick = () => navigator.clipboard.writeText(els.qrRaw.value || '')
+	    $('openQrViewBtn').onclick = () => {
+	      if (!state.qr) return alert('QR ainda não chegou')
+	      els.qrOverlay.hidden = false
+	    }
+	    $('closeQrViewBtn').onclick = () => { els.qrOverlay.hidden = true }
+	    $('clearQrBtn').onclick = () => renderQr('')
     $('clearEventsBtn').onclick = () => { state.events = []; renderEvents() }
     $('copyEventsBtn').onclick = () => navigator.clipboard.writeText(JSON.stringify(state.events, null, 2))
 

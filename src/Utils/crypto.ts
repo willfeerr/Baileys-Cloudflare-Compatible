@@ -52,7 +52,11 @@ const GCM_TAG_LENGTH = 128 >> 3
  * */
 export function aesEncryptGCM(plaintext: Uint8Array, key: Uint8Array, iv: Uint8Array, additionalData: Uint8Array) {
 	const cipher = createCipheriv('aes-256-gcm', key, iv)
-	cipher.setAAD(additionalData)
+
+	if (additionalData.byteLength > 0) {
+		cipher.setAAD(additionalData)
+	}
+
 	return Buffer.concat([cipher.update(plaintext), cipher.final(), cipher.getAuthTag()])
 }
 
@@ -65,8 +69,12 @@ export function aesDecryptGCM(ciphertext: Uint8Array, key: Uint8Array, iv: Uint8
 	// decrypt additional adata
 	const enc = ciphertext.slice(0, ciphertext.length - GCM_TAG_LENGTH)
 	const tag = ciphertext.slice(ciphertext.length - GCM_TAG_LENGTH)
+
 	// set additional data
-	decipher.setAAD(additionalData)
+	if (additionalData.byteLength > 0) {
+		decipher.setAAD(additionalData)
+	}
+
 	decipher.setAuthTag(tag)
 
 	return Buffer.concat([decipher.update(enc), decipher.final()])

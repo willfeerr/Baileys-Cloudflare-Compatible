@@ -26,6 +26,8 @@
     }
   ],
   "vars": {
-    "BAILEYS_API_TOKEN": "dev-token-change-me"
+    "BAILEYS_API_TOKEN": "dev-token-change-me",
+    "BAILEYS_INBOUND_WEBHOOK_URL": "https://workflow.skrbe.com/api/workflows/chat-sdk/inbound",
+    "BAILEYS_INBOUND_WEBHOOK_SECRET": "change-me"
   }
 }

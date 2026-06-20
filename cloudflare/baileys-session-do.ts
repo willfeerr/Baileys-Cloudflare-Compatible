@@ -1,20 +1,41 @@
 import makeWASocket, {
+	BufferJSON,
 	DisconnectReason,
 	createD1BaileysStore,
+	type BaileysEventMap,
 	type D1Database,
+	type WAMessage,
 	useD1AuthState
 } from '../src/index'
 import { miniWhatsAppResponse } from './mini-whatsapp-app'
+import { toString as qrToString } from 'qrcode'
 
 export interface Env {
 	BAILEYS_SESSION: DurableObjectNamespace
 	BAILEYS_D1: D1Database
 	BAILEYS_API_TOKEN?: string
+	BAILEYS_INBOUND_WEBHOOK_URL?: string
+	BAILEYS_INBOUND_WEBHOOK_SECRET?: string
 	/** Set to false/0/no/off to keep WebSocket smoke tests from connecting to WhatsApp automatically. */
 	BAILEYS_AUTO_START?: string
 }
 
 type WASocket = ReturnType<typeof makeWASocket>
+type MessageUpsertEvent = BaileysEventMap['messages.upsert']
+type ConnectionUpdateEvent = BaileysEventMap['connection.update']
+
+type SessionSnapshot = {
+	connected: boolean
+	qrCode?: string
+	sessionId: string
+	status: string
+	success: true
+	updatedAt: string
+	user?: {
+		id?: string
+		name?: string
+	}
+}
 
 type ClientCommand = {
 	type: 'start' | 'status' | 'restart' | 'logout' | 'reset-auth' | 'reset-all' | 'send-message'
@@ -23,6 +44,8 @@ type ClientCommand = {
 	text?: string
 	message?: Record<string, unknown>
 }
+
+const SESSION_SNAPSHOT_KEY = 'session:snapshot'
 
 const json = (body: unknown, status = 200) =>
 	new Response(JSON.stringify(body), {
@@ -36,7 +59,53 @@ const getStatusCode = (error: unknown): number | undefined => {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
-const isDisabled = (value: string | undefined) => ['false', '0', 'no', 'off'].includes(String(value || '').toLowerCase())
+const isDisabled = (value: string | undefined) =>
+	['false', '0', 'no', 'off'].includes(String(value || '').toLowerCase())
+
+const isRecord = (value: unknown): value is Record<string, unknown> => {
+	return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+const firstString = (...values: unknown[]) => {
+	for (const value of values) {
+		if (typeof value === 'string' && value.trim()) {
+			return value.trim()
+		}
+	}
+}
+
+const readJsonObject = async (request: Request): Promise<Record<string, unknown>> => {
+	const value = await request.json().catch(() => ({}))
+	return isRecord(value) ? value : {}
+}
+
+type ConsoleMethod = (...data: unknown[]) => void
+
+let libsignalLogRedactionInstalled = false
+
+const redactLibsignalSessionPayload = (method: ConsoleMethod, redactedMessages: ReadonlySet<string>): ConsoleMethod => {
+	return (first: unknown, ...rest: unknown[]) => {
+		if (typeof first === 'string' && redactedMessages.has(first)) {
+			method(first.replace(/:$/, ''))
+			return
+		}
+
+		method(first, ...rest)
+	}
+}
+
+const installLibsignalLogRedaction = () => {
+	if (libsignalLogRedactionInstalled) {
+		return
+	}
+
+	libsignalLogRedactionInstalled = true
+	console.info = redactLibsignalSessionPayload(
+		console.info.bind(console),
+		new Set(['Closing session:', 'Opening session:'])
+	)
+	console.warn = redactLibsignalSessionPayload(console.warn.bind(console), new Set(['Session already closed']))
+}
 
 const readToken = (request: Request) => {
 	const url = new URL(request.url)
@@ -56,6 +125,33 @@ const assertAuthorized = (request: Request, env: Env) => {
 	return null
 }
 
+const qrResponse = async (request: Request, env: Env) => {
+	const unauthorized = assertAuthorized(request, env)
+	if (unauthorized) {
+		return unauthorized
+	}
+
+	const url = new URL(request.url)
+	const data = url.searchParams.get('data') || ''
+	if (!data) {
+		return json({ ok: false, error: 'Missing QR data' }, 400)
+	}
+
+	const svg = await qrToString(data, {
+		type: 'svg',
+		errorCorrectionLevel: 'M',
+		margin: 4,
+		width: 720
+	})
+
+	return new Response(svg, {
+		headers: {
+			'content-type': 'image/svg+xml; charset=utf-8',
+			'cache-control': 'no-store'
+		}
+	})
+}
+
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url)
@@ -65,8 +161,12 @@ export default {
 			return miniWhatsAppResponse()
 		}
 
+		if (route === 'qr') {
+			return qrResponse(request, env)
+		}
+
 		if (route !== 'session') {
-			return json({ ok: false, error: 'Use /app or /session/:sessionId' }, 404)
+			return json({ ok: false, error: 'Use /app, /qr, or /session/:sessionId' }, 404)
 		}
 
 		const unauthorized = assertAuthorized(request, env)
@@ -107,22 +207,26 @@ export class BaileysSessionDO {
 			return this.readStoreBucket(bucket, url)
 		}
 
+		if ((action === 'send-message' || action === 'reply-message') && request.method === 'POST') {
+			return this.handleHttpSendMessage(request)
+		}
+
 		if (url.pathname.endsWith('/start')) {
 			await this.startBaileys()
-			return json({ ok: true, sessionId: this.sessionId })
+			return json(await this.getSessionSnapshot())
 		}
 
 		if (url.pathname.endsWith('/restart')) {
 			await this.restartBaileys('http-command')
-			return json({ ok: true, sessionId: this.sessionId })
+			return json(await this.getSessionSnapshot())
 		}
 
 		if (url.pathname.endsWith('/reset-auth')) {
 			await this.resetAuth(false)
-			return json({ ok: true, sessionId: this.sessionId })
+			return json(await this.getSessionSnapshot())
 		}
 
-		return json({ ok: true, sessionId: this.sessionId, connected: Boolean(this.sock?.ws?.isOpen) })
+		return json(await this.getSessionSnapshot())
 	}
 
 	async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
@@ -136,7 +240,9 @@ export class BaileysSessionDO {
 	}
 
 	async webSocketClose(ws: WebSocket, code: number, reason: string) {
-		ws.close(code, reason)
+		try {
+			ws.close(code, reason)
+		} catch {}
 	}
 
 	async alarm() {
@@ -178,6 +284,25 @@ export class BaileysSessionDO {
 		return json({ ok: true, sessionId: this.sessionId, bucket, entries })
 	}
 
+	private async handleHttpSendMessage(request: Request) {
+		try {
+			const body = await readJsonObject(request)
+			const result = await this.sendMessageFromBody(body)
+			const messageId = result?.key?.id
+
+			return json({
+				ok: true,
+				success: true,
+				sessionId: this.sessionId,
+				conversationId: result?.key?.remoteJid,
+				messageIds: messageId ? [messageId] : [],
+				result
+			})
+		} catch (error) {
+			return json({ ok: false, success: false, error: String((error as Error)?.message || error) }, 400)
+		}
+	}
+
 	private async resolveSessionId(request?: Request): Promise<string> {
 		if (request) {
 			const url = new URL(request.url)
@@ -189,6 +314,52 @@ export class BaileysSessionDO {
 		}
 
 		return (await this.state.storage.get<string>('sessionId')) || 'default'
+	}
+
+	private async readSessionSnapshot(): Promise<SessionSnapshot | undefined> {
+		return this.state.storage.get<SessionSnapshot>(SESSION_SNAPSHOT_KEY)
+	}
+
+	private async getSessionSnapshot(): Promise<SessionSnapshot> {
+		const saved = await this.readSessionSnapshot()
+		const runtimeConnected = Boolean(this.sock?.ws?.isOpen)
+		const connected = runtimeConnected || saved?.connected === true
+		const status = connected ? 'connected' : saved?.status || 'idle'
+
+		return {
+			connected,
+			qrCode: connected ? undefined : saved?.qrCode,
+			sessionId: this.sessionId,
+			status,
+			success: true,
+			updatedAt: saved?.updatedAt || new Date().toISOString(),
+			user: saved?.user
+		}
+	}
+
+	private async persistConnectionUpdate(update: ConnectionUpdateEvent, sock: WASocket) {
+		const saved = await this.readSessionSnapshot()
+		const qrCode = firstString(update.qr)
+		const connection = firstString(update.connection)
+		const connected = connection === 'open' || Boolean(sock.ws?.isOpen)
+		const status =
+			qrCode ? 'qr' : connected ? 'connected' : connection === 'connecting' ? 'connecting' : connection === 'close' ? 'disconnected' : saved?.status || 'idle'
+		const user = isRecord(sock.user)
+			? {
+					id: firstString(sock.user.id),
+					name: firstString(sock.user.name)
+				}
+			: saved?.user
+
+		await this.state.storage.put<SessionSnapshot>(SESSION_SNAPSHOT_KEY, {
+			connected,
+			qrCode: connected ? undefined : qrCode || saved?.qrCode,
+			sessionId: this.sessionId,
+			status,
+			success: true,
+			updatedAt: new Date().toISOString(),
+			user
+		})
 	}
 
 	private async startBaileys(): Promise<WASocket> {
@@ -208,6 +379,8 @@ export class BaileysSessionDO {
 	}
 
 	private async createBaileysSocket(): Promise<WASocket> {
+		installLibsignalLogRedaction()
+
 		const auth = await useD1AuthState(this.env.BAILEYS_D1, { sessionId: this.sessionId })
 		const store = await createD1BaileysStore(this.env.BAILEYS_D1, { sessionId: this.sessionId })
 
@@ -232,6 +405,13 @@ export class BaileysSessionDO {
 
 		sock.ev.on('connection.update', update => {
 			this.broadcast({ type: 'connection.update', sessionId: this.sessionId, update })
+			void this.persistConnectionUpdate(update, sock).catch(error => {
+				this.broadcast({
+					type: 'session.snapshot.error',
+					sessionId: this.sessionId,
+					error: String(error?.message || error)
+				})
+			})
 
 			if (update.connection === 'open') {
 				this.reconnectAttempts = 0
@@ -246,15 +426,93 @@ export class BaileysSessionDO {
 
 		sock.ev.on('messages.upsert', event => {
 			this.broadcast({ type: 'messages.upsert', sessionId: this.sessionId, event })
+			void this.forwardInboundMessages(event).catch(error => {
+				this.broadcast({
+					type: 'inbound.webhook.error',
+					sessionId: this.sessionId,
+					error: String(error?.message || error)
+				})
+			})
 		})
 
 		return sock
+	}
+
+	private async forwardInboundMessages(event: MessageUpsertEvent) {
+		const webhookUrl = this.env.BAILEYS_INBOUND_WEBHOOK_URL
+		if (!webhookUrl || event.type !== 'notify') {
+			return
+		}
+
+		for (const message of event.messages) {
+			if (!this.shouldForwardInboundMessage(message)) {
+				continue
+			}
+
+			await this.forwardInboundMessage(webhookUrl, event, message)
+		}
+	}
+
+	private shouldForwardInboundMessage(message: WAMessage) {
+		const remoteJid = message.key?.remoteJid
+		return Boolean(message.key?.id && remoteJid && remoteJid !== 'status@broadcast' && !message.key?.fromMe)
+	}
+
+	private async forwardInboundMessage(webhookUrl: string, event: MessageUpsertEvent, message: WAMessage) {
+		const remoteJid = message.key?.remoteJid
+		const messageId = message.key?.id
+		if (!remoteJid || !messageId) {
+			return
+		}
+
+		const dedupeKey = `inbound-webhook:${remoteJid}:${messageId}`
+		if (await this.state.storage.get<number>(dedupeKey)) {
+			return
+		}
+
+		const response = await fetch(webhookUrl, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/json',
+				'x-baileys-session-id': this.sessionId,
+				...(this.env.BAILEYS_INBOUND_WEBHOOK_SECRET
+					? { authorization: `Bearer ${this.env.BAILEYS_INBOUND_WEBHOOK_SECRET}` }
+					: {})
+			},
+			body: JSON.stringify(
+				{
+					type: 'whatsapp.message.received',
+					source: 'baileys-cloudflare-worker',
+					sessionId: this.sessionId,
+					eventType: event.type,
+					messageId,
+					conversationId: remoteJid,
+					from: message.key?.participant || remoteJid,
+					pushName: message.pushName,
+					message
+				},
+				BufferJSON.replacer
+			)
+		})
+
+		if (!response.ok) {
+			throw new Error(`Inbound webhook failed with status ${response.status}`)
+		}
+
+		await this.state.storage.put(dedupeKey, Date.now())
 	}
 
 	private async handleBaileysClose(statusCode?: number) {
 		this.sock = null
 
 		if (statusCode === DisconnectReason.loggedOut) {
+			await this.state.storage.put<SessionSnapshot>(SESSION_SNAPSHOT_KEY, {
+				connected: false,
+				sessionId: this.sessionId,
+				status: 'logged-out',
+				success: true,
+				updatedAt: new Date().toISOString()
+			})
 			this.broadcast({ type: 'baileys.logged-out', sessionId: this.sessionId })
 			return
 		}
@@ -318,13 +576,58 @@ export class BaileysSessionDO {
 		await this.startBaileys()
 	}
 
+	private async sendMessageFromBody(body: Record<string, unknown>) {
+		const jid = firstString(body.jid, body.to, body.conversationId, body.chatId)
+		if (!jid) {
+			throw new Error('jid, to, conversationId, or chatId is required')
+		}
+
+		const message = this.resolveOutboundMessage(body)
+		const options = await this.resolveOutboundOptions(body)
+		const sock = await this.startBaileys()
+
+		return sock.sendMessage(jid, message as any, options as any)
+	}
+
+	private resolveOutboundMessage(body: Record<string, unknown>) {
+		if (isRecord(body.message)) {
+			return body.message
+		}
+
+		const text = firstString(body.text, body.message)
+		if (!text) {
+			throw new Error('text or message is required')
+		}
+
+		return { text }
+	}
+
+	private async resolveOutboundOptions(body: Record<string, unknown>) {
+		const options: Record<string, unknown> = {}
+
+		if (isRecord(body.quoted)) {
+			options.quoted = body.quoted
+		}
+
+		const replyToMessageId = firstString(body.replyToMessageId)
+		if (!options.quoted && replyToMessageId) {
+			const store = await createD1BaileysStore(this.env.BAILEYS_D1, { sessionId: this.sessionId })
+			const quoted = await store.get<unknown>('messages', replyToMessageId)
+			if (quoted) {
+				options.quoted = quoted
+			}
+		}
+
+		return Object.keys(options).length > 0 ? options : undefined
+	}
+
 	private async handleCommand(command: ClientCommand) {
 		switch (command.type) {
 			case 'start':
 				await this.startBaileys()
 				return { ok: true }
 			case 'status':
-				return { ok: true, connected: Boolean(this.sock?.ws?.isOpen), sessionId: this.sessionId }
+				return this.getSessionSnapshot()
 			case 'restart':
 				await this.restartBaileys('client-command')
 				return { ok: true }
@@ -338,9 +641,11 @@ export class BaileysSessionDO {
 				await this.resetAuth(true)
 				return { ok: true }
 			case 'send-message': {
-				if (!command.jid) throw new Error('jid is required')
-				const sock = await this.startBaileys()
-				const result = await sock.sendMessage(command.jid, command.message || { text: command.text || '' })
+				const result = await this.sendMessageFromBody({
+					jid: command.jid,
+					text: command.text,
+					message: command.message
+				})
 				return { ok: true, result }
 			}
 			default:

@@ -70,7 +70,9 @@ export const useD1AuthState = async (
 							let value = await readData<SignalDataTypeMap[typeof type]>(`key:${type}:${id}`)
 
 							if (type === 'app-state-sync-key' && value) {
-								value = proto.Message.AppStateSyncKeyData.fromObject(value) as SignalDataTypeMap[typeof type]
+								value = proto.Message.AppStateSyncKeyData.fromObject(
+									value as Record<string, unknown>
+								) as unknown as SignalDataTypeMap[typeof type]
 							}
 
 							data[id] = value as SignalDataTypeMap[typeof type]

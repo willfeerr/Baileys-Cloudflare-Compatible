@@ -34,6 +34,17 @@ type WebSocketUpgradeResponse = Response & {
 
 const isCloudflareRuntime = () => typeof (globalThis as any).WebSocketPair !== 'undefined'
 
+const toFetchUpgradeUrl = (url: URL) => {
+	const fetchUrl = new URL(url)
+	if (fetchUrl.protocol === 'wss:') {
+		fetchUrl.protocol = 'https:'
+	} else if (fetchUrl.protocol === 'ws:') {
+		fetchUrl.protocol = 'http:'
+	}
+
+	return fetchUrl
+}
+
 const toBuffer = async (data: unknown): Promise<string | Buffer> => {
 	if (typeof data === 'string') {
 		return data
@@ -115,7 +126,7 @@ export class WebSocketClient extends AbstractSocketClient {
 		headers.set('Origin', DEFAULT_ORIGIN)
 		headers.set('Upgrade', 'websocket')
 
-		const response = (await fetch(this.url.toString(), {
+		const response = (await fetch(toFetchUpgradeUrl(this.url).toString(), {
 			...this.config.options,
 			headers,
 			signal: this.abortController.signal

@@ -26,7 +26,13 @@ CREATE INDEX IF NOT EXISTS idx_baileys_store_session_bucket_updated
 `
 
 export const ensureD1BaileysSchema = async (db: D1Database) => {
-	await db.exec(D1_BAILEYS_SCHEMA)
+	const statements = D1_BAILEYS_SCHEMA.split(';')
+		.map(statement => statement.trim())
+		.filter(Boolean)
+
+	for (const statement of statements) {
+		await db.prepare(statement).run()
+	}
 }
 
 export const assertSafeSqlIdentifier = (name: string) => {

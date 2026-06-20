@@ -79,7 +79,10 @@ export const createD1BaileysStore = async (db: D1Database, options: D1StoreOptio
 		await db.batch(ids.map(id => removeStatement(bucket, id)))
 	}
 
-	const list = async <T = unknown>(bucket: string, listOptions: D1StoreListOptions = {}): Promise<D1StoreEntry<T>[]> => {
+	const list = async <T = unknown>(
+		bucket: string,
+		listOptions: D1StoreListOptions = {}
+	): Promise<D1StoreEntry<T>[]> => {
 		const limit = Math.min(Math.max(listOptions.limit || 100, 1), 1000)
 		const afterUpdatedAt = listOptions.afterUpdatedAt || 0
 
@@ -111,7 +114,7 @@ export const createD1BaileysStore = async (db: D1Database, options: D1StoreOptio
 	}
 
 	const cacheStore = (bucket: string): CacheStore => ({
-		get: <T>(key: string) => get<T>(bucket, key),
+		get: <T>(key: string) => get<T>(bucket, key) as Promise<T>,
 		set: <T>(key: string, value: T) => upsert(bucket, key, value),
 		del: (key: string) => remove(bucket, key),
 		flushAll: () => clear(bucket),
@@ -131,14 +134,18 @@ export const createD1BaileysStore = async (db: D1Database, options: D1StoreOptio
 		ev.on('contacts.upsert', async (contacts: any[]) => {
 			await upsertMany(
 				'contacts',
-				(contacts || []).map(contact => ({ id: contact.id || contact.jid, value: contact })).filter(entry => Boolean(entry.id))
+				(contacts || [])
+					.map(contact => ({ id: contact.id || contact.jid, value: contact }))
+					.filter(entry => Boolean(entry.id))
 			)
 		})
 
 		ev.on('contacts.update', async (contacts: any[]) => {
 			await upsertMany(
 				'contacts',
-				(contacts || []).map(contact => ({ id: contact.id || contact.jid, value: contact })).filter(entry => Boolean(entry.id))
+				(contacts || [])
+					.map(contact => ({ id: contact.id || contact.jid, value: contact }))
+					.filter(entry => Boolean(entry.id))
 			)
 		})
 
